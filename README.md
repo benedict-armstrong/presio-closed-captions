@@ -12,18 +12,22 @@ A [Presio](https://presio.ch) plugin.
 
 ## Install
 
-In Presio: **Settings → Plugins → Add**, and paste one of these:
+In Presio, go to **Settings → Plugins → Add plugin** and enter:
 
 ```
-https://cdn.jsdelivr.net/gh/benedict-armstrong/presio-closed-captions@v0.1.0/
-https://raw.githubusercontent.com/benedict-armstrong/presio-closed-captions/v0.1.0/
+github:benedict-armstrong/presio-closed-captions
 ```
 
-Use a tag (`@v0.1.0`) rather than a branch (`@main`). Viewers load the plugin
-themselves and check it against the presenter's copy, byte for byte. A branch
-URL is cached for minutes (raw) to hours (jsDelivr), so after a push the
-presenter and the audience can get different versions, and then viewers
-silently go without captions.
+Presio looks up the latest release on GitHub (or the newest tag, or else the
+commit `main` is on right now) and pins the plugin to it. Viewers load the
+plugin themselves and check it's byte for byte the presenter's copy, so a
+moving branch URL could leave them without it. To pick a version, use
+`github:benedict-armstrong/presio-closed-captions@v0.1.0`. A
+`https://github.com/benedict-armstrong/presio-closed-captions` link works too.
+
+Under the hood this is served by jsDelivr, e.g.
+`https://cdn.jsdelivr.net/gh/benedict-armstrong/presio-closed-captions@v0.1.0/`,
+which you can also paste directly.
 
 ## Browser support
 
