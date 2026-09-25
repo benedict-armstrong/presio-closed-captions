@@ -1,7 +1,7 @@
 {
   "id": "closed-captions",
   "name": "Closed Captions",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Benedict Armstrong",
   "description": "Live captions of what the presenter says, on the slide for every viewer. Uses the browser's speech recognition on the presenter's device.",
   "main": "index.html",

@@ -46,43 +46,233 @@
 
   function background() {
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    // Whether this browser can listen to a chosen microphone: start(track)
+    // throws a TypeError for anything but a track where it's supported, and
+    // ignores the argument (and starts) where it isn't.
+    const canPickMic = Recognition && (() => {
+      const probe = new Recognition();
+      try {
+        probe.start(0);
+      } catch (err) {
+        return err instanceof TypeError;
+      }
+      probe.abort();
+      return false;
+    })();
+    // The menu's "use the system's microphone" item.
+    const SYSTEM_MIC = "system";
+
     let on = false;
     let rec = null;
     let error = "";
+    // Something's wrong but captions keep trying (the mic is busy elsewhere,
+    // the speech service is unreachable); cleared by the next words heard.
+    let warning = "";
     let lastLive = "";
     // Recognition ends by itself (silence, a minute of speech, a network
     // hiccup); while captions are on it's restarted, backing off if it keeps
-    // ending straight away.
+    // ending straight away, and giving up if it never gets going.
     let startedAt = 0;
     let quickEnds = 0;
     let restartTimer = null;
+    // The chosen microphone's stream, kept while captions are on.
+    let stream = null;
+    // Bumped by stop(), so a start still waiting for its microphone gives up.
+    let generation = 0;
+    let mics = [];
+    // The level meter on the button while captions are on: three bars for
+    // the voice's low, middle and high frequencies ("▂▅▃").
+    let meter = null;
+    let bars = "";
+
+    // The chosen microphone: kept on this device only (device ids are this
+    // browser's own), with its name to find it again if its id changes.
+    function chosenMic() {
+      const saved = presio.storage.get("mic");
+      if (!saved || !saved.id) return null;
+      return mics.find((m) => m.deviceId === saved.id) || mics.find((m) => m.label && m.label === saved.label) || null;
+    }
+
+    function menu() {
+      const entries = [{ heading: "Microphone" }];
+      if (!canPickMic) {
+        entries.push({ id: SYSTEM_MIC, label: "System default", checked: true });
+        entries.push({ id: "unsupported", label: "This browser can't pick one", disabled: true });
+        return entries;
+      }
+      const chosen = chosenMic();
+      entries.push({ id: SYSTEM_MIC, label: "System default", checked: !chosen });
+      const named = mics.filter((m) => m.label);
+      for (const m of named) entries.push({ id: m.deviceId, label: m.label, checked: !!chosen && chosen.deviceId === m.deviceId });
+      // Browsers only name microphones once the page may use one.
+      if (!named.length) entries.push({ id: "reveal", label: "Show microphones…" });
+      return entries;
+    }
 
     function renderButton() {
       if (!Recognition) {
         presio.ui.setButton("toggle", { disabled: true, label: "No captions here" });
         return;
       }
-      presio.ui.setButton("toggle", { active: on, label: error || (on ? "Captions on" : "Captions") });
+      presio.ui.setButton("toggle", {
+        active: on,
+        label: error || (on && warning) || (on ? `Captions on${bars ? " " + bars : ""}` : "Captions"),
+        menu: menu(),
+      });
+    }
+
+    async function refreshMics() {
+      if (!canPickMic || !navigator.mediaDevices) return;
+      try {
+        // "default" and "communications" are Chrome's aliases for real
+        // devices, which are listed too; "System default" stands for them.
+        mics = (await navigator.mediaDevices.enumerateDevices()).filter(
+          (d) => d.kind === "audioinput" && d.deviceId !== "default" && d.deviceId !== "communications"
+        );
+      } catch {
+        mics = [];
+      }
+      renderButton();
+    }
+
+    async function pickMic(id) {
+      if (id === "reveal") {
+        try {
+          const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+          s.getTracks().forEach((t) => t.stop());
+        } catch {
+          error = "Mic blocked";
+        }
+        await refreshMics();
+        return;
+      }
+      const mic = mics.find((m) => m.deviceId === id);
+      presio.storage.set("mic", mic ? { id: mic.deviceId, label: mic.label } : undefined);
+      renderButton();
+      // Listen to the new one straight away.
+      if (on) {
+        stop();
+        start();
+        startMeter();
+      }
     }
 
     function setOn(next) {
       if (next && !Recognition) return;
       on = next;
       error = "";
+      warning = "";
+      quickEnds = 0;
       presio.send("state", { on }, { retain: true });
-      if (on) start();
-      else stop();
+      if (on) {
+        start();
+        startMeter();
+      } else {
+        stop();
+        stopMeter();
+      }
       renderButton();
     }
 
-    function start() {
+    // How loud the microphone is, drawn on the button. Its own capture of the
+    // same microphone: speech recognition doesn't share its audio. Each bar
+    // is how far its band is above the room's noise, which it learns: the
+    // floor drops to any quieter reading and creeps back up slowly.
+    const LEVELS = "▁▂▃▄▅▆▇█";
+    const BANDS = [[100, 400], [400, 1200], [1200, 4000]];
+    // How far above the floor fills a bar: voices are quieter up high.
+    const FULL = [0.25, 0.2, 0.12];
+    async function startMeter() {
+      stopMeter();
+      if (!navigator.mediaDevices || !window.AudioContext) return;
+      const token = {};
+      meter = { token };
+      const mic = canPickMic && chosenMic();
+      let s;
+      try {
+        s = await navigator.mediaDevices.getUserMedia({ audio: mic ? { deviceId: { exact: mic.deviceId } } : true });
+      } catch {
+        if (meter && meter.token === token) meter = null;
+        return;
+      }
+      if (!meter || meter.token !== token) {
+        s.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      const ctx = new AudioContext();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.5;
+      ctx.createMediaStreamSource(s).connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const hz = ctx.sampleRate / analyser.fftSize;
+      const bins = BANDS.map(([lo, hi]) => [Math.floor(lo / hz), Math.ceil(hi / hz)]);
+      const floor = bins.map(() => 1);
+      // A timer, not requestAnimationFrame: this frame is never drawn.
+      const timer = setInterval(() => {
+        if (ctx.state === "suspended") ctx.resume().catch(() => {});
+        analyser.getByteFrequencyData(data);
+        const next = bins
+          .map(([a, b], i) => {
+            let sum = 0;
+            for (let k = a; k < b; k++) sum += data[k];
+            const v = sum / (b - a) / 255;
+            floor[i] = v < floor[i] ? v : floor[i] + 0.0005;
+            const level = (v - floor[i] - 0.02) / FULL[i];
+            return LEVELS[Math.max(0, Math.min(LEVELS.length - 1, Math.round(level * (LEVELS.length - 1))))];
+          })
+          .join("");
+        if (next !== bars) {
+          bars = next;
+          renderButton();
+        }
+      }, 100);
+      meter = { token, stream: s, ctx, timer };
+    }
+
+    function stopMeter() {
+      if (meter && meter.timer) {
+        clearInterval(meter.timer);
+        meter.stream.getTracks().forEach((t) => t.stop());
+        meter.ctx.close().catch(() => {});
+      }
+      meter = null;
+      bars = "";
+    }
+
+    // The chosen microphone's audio track, or null for the system's.
+    async function micTrack() {
+      const mic = canPickMic && chosenMic();
+      if (!mic) return null;
+      const live = stream && stream.getAudioTracks()[0];
+      if (live && live.readyState === "live") return live;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: mic.deviceId } } });
+        return stream.getAudioTracks()[0];
+      } catch (err) {
+        console.warn("Closed captions: can't open the chosen microphone, using the system's", err);
+        warning = "Chosen mic unavailable";
+        renderButton();
+        return null;
+      }
+    }
+
+    async function start() {
       clearTimeout(restartTimer);
       if (rec) return;
-      rec = new Recognition();
-      rec.lang = presio.settings.get("language") || navigator.language;
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.onresult = (e) => {
+      const current = generation;
+      const r = new Recognition();
+      rec = r;
+      const track = await micTrack();
+      if (generation !== current || rec !== r) return;
+      r.lang = presio.settings.get("language") || navigator.language;
+      r.continuous = true;
+      r.interimResults = true;
+      r.onresult = (e) => {
+        if (warning) {
+          warning = "";
+          renderButton();
+        }
         let live = "";
         for (let i = e.resultIndex; i < e.results.length; i++) {
           const text = e.results[i][0].transcript.trim();
@@ -95,7 +285,7 @@
           presio.send("live", { text: live }, { volatile: true });
         }
       };
-      rec.onerror = (e) => {
+      r.onerror = (e) => {
         const fatal = {
           "not-allowed": "Mic blocked",
           "service-not-allowed": "Mic blocked",
@@ -106,9 +296,17 @@
           setOn(false);
           error = fatal;
           renderButton();
+          return;
+        }
+        // Chrome runs one recognizer at a time: another tab (or window)
+        // with captions on takes the microphone from this one.
+        const next = { aborted: "Mic in use elsewhere", network: "Captions offline" }[e.error];
+        if (next && next !== warning) {
+          warning = next;
+          renderButton();
         }
       };
-      rec.onend = () => {
+      r.onend = () => {
         rec = null;
         if (lastLive) {
           lastLive = "";
@@ -116,11 +314,19 @@
         }
         if (!on) return;
         quickEnds = Date.now() - startedAt < 2000 ? quickEnds + 1 : 0;
+        if (quickEnds >= 6) {
+          const reason = warning || "Captions stopped";
+          setOn(false);
+          error = reason;
+          renderButton();
+          return;
+        }
         restartTimer = setTimeout(start, Math.min(250 * 2 ** quickEnds, 10000));
       };
       startedAt = Date.now();
       try {
-        rec.start();
+        if (track) r.start(track);
+        else r.start();
       } catch (err) {
         console.error(err);
         rec = null;
@@ -128,6 +334,7 @@
     }
 
     function stop() {
+      generation++;
       clearTimeout(restartTimer);
       const r = rec;
       rec = null;
@@ -135,11 +342,17 @@
         r.onend = null;
         r.abort();
       }
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+        stream = null;
+      }
       lastLive = "";
     }
 
     presio.onButton("toggle", () => setOn(!on));
     presio.onCommand("toggle", () => setOn(!on));
+    presio.onMenu("toggle", (id) => pickMic(id));
+    if (canPickMic && navigator.mediaDevices) navigator.mediaDevices.addEventListener("devicechange", refreshMics);
     // A new language needs a new recognizer.
     presio.settings.onChange(() => {
       if (on) {
@@ -152,6 +365,7 @@
       if (type === "state" && from === "presenter" && payload && payload.on && !on) setOn(true);
     });
     renderButton();
+    refreshMics();
   }
 
   function slide() {
