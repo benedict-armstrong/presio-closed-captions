@@ -5,10 +5,11 @@
 <style>
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
   body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-  /* The slide surface is sized to the page, so vw is a fraction of the slide's width. */
+  /* Placed by render(): sized to the page and, where the slide area has a
+     bar beside the page big enough for it, moved into the bar. */
   .captions {
-    position: absolute; left: 50%; transform: translateX(-50%);
-    width: max-content; max-width: 88%; box-sizing: border-box;
+    position: absolute; transform: translateX(-50%);
+    width: max-content; box-sizing: border-box;
     display: flex; flex-direction: column; justify-content: flex-end;
     overflow: hidden;
     padding: .25em .6em; border-radius: .3em;
@@ -16,17 +17,28 @@
     line-height: 1.3; text-align: center;
     transition: opacity .4s;
   }
-  .captions.bottom { bottom: 5%; }
-  .captions.top { top: 5%; }
-  .captions.small { font-size: 2.2vw; }
-  .captions.medium { font-size: 3vw; }
-  .captions.large { font-size: 4vw; }
   .captions.hidden { opacity: 0; }
+  /* Draggable: the presenter's copy moves them for everyone, a viewer's
+     only on their own screen. */
+  .captions.movable { cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none; }
+  .captions.movable:active { cursor: grabbing; }
   .live { opacity: .75; }
+  /* A viewer's own switch: the CC pill turns the captions on and off on
+     their screen. */
+  .cc {
+    position: absolute; left: 8px; bottom: 8px; box-sizing: border-box;
+    height: 22px; padding: 0 7px; border: 0; border-radius: 11px;
+    font: 600 12px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #fff; background: rgba(0, 0, 0, .78); cursor: pointer; opacity: .55;
+  }
+  .cc:hover { opacity: 1; }
+  .cc.off { text-decoration: line-through; opacity: .4; }
+  .cc[hidden] { display: none; }
 </style>
 </head>
 <body>
 <div class="captions hidden" id="captions"><div><span id="final"></span> <span class="live" id="live"></span></div></div>
+<button type="button" class="cc" id="cc" hidden aria-label="Captions on this screen">CC</button>
 
 <script>
   // Closed captions for Presio. One file, two surfaces:
@@ -39,7 +51,9 @@
   //  - "state" { on } (retained): captions on or off — late joiners, and a
   //    reloaded presenter page, pick it up;
   //  - "live" { text } (volatile): the words so far of the sentence being said;
-  //  - "line" { text }: a finished sentence.
+  //  - "line" { text }: a finished sentence;
+  //  - "pos" { x, y } (retained once dropped): where the presenter dragged
+  //    the captions, their center as page fractions; null puts them back.
 
   if (presio.surface === "background") background();
   else if (presio.surface === "slide") slide();
@@ -372,20 +386,197 @@
     const box = document.getElementById("captions");
     const finalEl = document.getElementById("final");
     const liveEl = document.getElementById("live");
+    const presenter = presio.role === "presenter";
     let on = false;
     let finals = "";
     let live = "";
     let fadeTimer = null;
+    // Where the presenter dragged the captions, for everyone: the box's
+    // center as page fractions (outside 0–1 in the bars around the page), or
+    // null to place them by the settings.
+    let moved = null;
+    // A viewer's own spot, on their device only; it wins over the
+    // presenter's until they double-click to follow the presenter again.
+    const OWN_KEY = "presio-closed-captions:position";
+    let own = presenter ? null : loadOwn();
+    // A viewer can hide the captions on their screen; the presenter has the
+    // button (and the "show on your own slide" setting) for theirs.
+    const MUTED_KEY = "presio-closed-captions:hidden";
+    const ccEl = document.getElementById("cc");
+    let muted = !presenter && load(MUTED_KEY) === true;
+    let drag = null;
+    // Text size, as a fraction of the page's width.
+    const SIZES = { small: 0.022, medium: 0.03, large: 0.04 };
 
     function render() {
       const s = presio.settings.all;
-      const shown = on && (presio.role !== "presenter" || s.showOnPresenter !== false);
+      const shown = on && (!presenter || s.showOnPresenter !== false);
       const lines = Math.max(1, Math.min(4, Number(s.lines) || 2));
-      box.className = `captions ${s.position === "top" ? "top" : "bottom"} ${s.size || "medium"}`;
-      box.style.maxHeight = `${lines * 1.3}em`;
+      box.className = "captions movable";
       finalEl.textContent = finals;
       liveEl.textContent = live;
-      if (!shown || (!finals && !live)) box.classList.add("hidden");
+      place(lines, s.position === "top", SIZES[s.size] || SIZES.medium);
+      const visible = shown && !muted && !!(finals || live);
+      if (!visible) box.classList.add("hidden");
+      // The CC pill: a viewer's switch, there whenever captions are on.
+      ccEl.hidden = presenter || !on;
+      ccEl.classList.toggle("off", muted);
+      ccEl.setAttribute("aria-pressed", String(!muted));
+      ccEl.title = muted ? "Show captions on this screen" : "Hide captions on this screen";
+      updateInteractive(visible);
+    }
+
+    // Where the page is in this surface: all of it on Presio versions that
+    // size the surface to the page, else ("slideSurface": "area") somewhere
+    // inside, with bars around it when its shape differs from the screen's.
+    function pageBox() {
+      const p = presio.ui.page || { x: 0, y: 0, w: 1, h: 1 };
+      return { x: p.x * innerWidth, y: p.y * innerHeight, w: p.w * innerWidth, h: p.h * innerHeight };
+    }
+
+    function place(lines, top, size) {
+      const W = innerWidth;
+      const H = innerHeight;
+      const page = pageBox();
+      const style = box.style;
+      style.maxHeight = `${lines * 1.3}em`;
+      style.top = style.bottom = "";
+      const spot = own || moved;
+      if (spot) {
+        // Where they were dragged to, kept on screen: a spot in a bar this
+        // screen doesn't have comes back to the nearest edge.
+        style.fontSize = `${page.w * size}px`;
+        style.maxWidth = `${Math.min(W, page.w * 0.88)}px`;
+        const w = box.offsetWidth;
+        const h = box.offsetHeight;
+        const cx = Math.min(Math.max(page.x + spot.x * page.w, w / 2), W - w / 2);
+        const cy = Math.min(Math.max(page.y + spot.y * page.h, h / 2), H - h / 2);
+        style.left = `${cx}px`;
+        style.top = `${cy - h / 2}px`;
+        return;
+      }
+      // The bar on the chosen side: captions go in it, off the slide, when
+      // they fit there at no less than 70% of their size (shrunk to fit);
+      // otherwise they sit on the slide's edge.
+      const bar = top ? page.y : H - page.y - page.h;
+      const gap = Math.max(4, bar * 0.08);
+      const fits = (bar - 2 * gap) / (lines * 1.3);
+      const inBar = fits >= page.w * size * 0.7;
+      const font = inBar ? Math.min(page.w * size, fits) : page.w * size;
+      const height = font * lines * 1.3;
+      style.fontSize = `${font}px`;
+      style.left = `${page.x + page.w / 2}px`;
+      // In a bar they may use its full width; on the slide, most of the page's.
+      style.maxWidth = `${(inBar ? Math.min(W, page.w * 1.1) : page.w * 0.88)}px`;
+      if (top) style.top = `${inBar ? Math.max(0, (bar - height) / 2) : page.y + page.h * 0.05}px`;
+      else style.bottom = `${inBar ? Math.max(0, (bar - height) / 2) : H - page.y - page.h + page.h * 0.05}px`;
+    }
+
+    // Dragging the captions: the presenter's move them for everyone, a
+    // viewer's only on their own screen. The frame takes input over them only
+    // (all of it mid-drag, so the drag can't slip off).
+    let interactiveKey = "";
+    function updateInteractive(visible) {
+      let value = false;
+      if (drag) value = true;
+      else {
+        const areas = [];
+        if (visible) areas.push(box);
+        if (!ccEl.hidden) areas.push(ccEl);
+        if (areas.length) {
+          value = areas.map((el) => {
+            const r = el.getBoundingClientRect();
+            return { x: r.left / innerWidth, y: r.top / innerHeight, w: r.width / innerWidth, h: r.height / innerHeight };
+          });
+        }
+      }
+      const key = JSON.stringify(value);
+      if (key === interactiveKey) return;
+      interactiveKey = key;
+      presio.ui.setInteractive(value);
+    }
+
+    box.title = presenter
+      ? "Drag to move the captions on every screen — double-click to put them back"
+      : "Drag to move the captions on your screen — double-click to put them back";
+    box.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || !e.isPrimary) return;
+      e.preventDefault();
+      // Touches reach this frame forwarded by Presio, and those can't be
+      // captured here; Presio sends them all to this box regardless.
+      try {
+        box.setPointerCapture(e.pointerId);
+      } catch {}
+      const r = box.getBoundingClientRect();
+      drag = { dx: e.clientX - (r.left + r.width / 2), dy: e.clientY - (r.top + r.height / 2), moved: false };
+      updateInteractive(true);
+    });
+    box.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const page = pageBox();
+      drag.moved = true;
+      const spot = { x: round((e.clientX - drag.dx - page.x) / page.w), y: round((e.clientY - drag.dy - page.y) / page.h) };
+      if (presenter) {
+        moved = spot;
+        // Viewers follow along; the spot it ends on is kept (below).
+        presio.send("pos", spot, { volatile: true });
+      } else own = spot;
+      render();
+    });
+    const end = () => {
+      if (!drag) return;
+      const wasMoved = drag.moved;
+      drag = null;
+      render();
+      if (!wasMoved) return;
+      if (presenter) presio.send("pos", moved, { retain: true });
+      else saveOwn(own);
+    };
+    box.addEventListener("pointerup", end);
+    box.addEventListener("pointercancel", end);
+    box.addEventListener("dblclick", () => {
+      if (presenter) {
+        moved = null;
+        // A retained null forgets the spot, for devices joining later too.
+        presio.send("pos", null, { retain: true });
+      } else {
+        own = null;
+        saveOwn(null);
+      }
+      render();
+    });
+
+    function setMuted(next) {
+      muted = next;
+      save(MUTED_KEY, next || null);
+      render();
+    }
+    ccEl.addEventListener("click", () => setMuted(!muted));
+
+    // Plugin frames share the page's storage: the keys are this plugin's own.
+    function loadOwn() {
+      const v = load(OWN_KEY);
+      return v && Number.isFinite(v.x) && Number.isFinite(v.y) ? { x: v.x, y: v.y } : null;
+    }
+    function saveOwn(spot) {
+      save(OWN_KEY, spot);
+    }
+    function load(key) {
+      try {
+        return JSON.parse(localStorage.getItem(key) || "null");
+      } catch {
+        return null;
+      }
+    }
+    function save(key, value) {
+      try {
+        if (value) localStorage.setItem(key, JSON.stringify(value));
+        else localStorage.removeItem(key);
+      } catch {}
+    }
+
+    function round(v) {
+      return Math.round(v * 1e4) / 1e4;
     }
 
     function touched() {
@@ -416,10 +607,16 @@
         finals = `${finals} ${(payload && payload.text) || ""}`.trim().slice(-600);
         live = "";
         touched();
+      } else if (type === "pos") {
+        const ok = payload && Number.isFinite(payload.x) && Number.isFinite(payload.y);
+        moved = ok ? { x: payload.x, y: payload.y } : null;
+        render();
       }
     });
     presio.settings.onChange(render);
     presio.onContextChange(render);
+    if (presio.ui.onPageChange) presio.ui.onPageChange(render);
+    window.addEventListener("resize", render);
     render();
   }
 </script>

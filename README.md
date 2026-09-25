@@ -6,7 +6,13 @@ A [Presio](https://presio.ch) plugin.
 - Press **Captions** in the controller's bottom bar (or `t`) to start. Your
   browser asks for the microphone once.
 - What you say appears at the bottom of the slide on every viewer screen, and
-  on your own current slide (switch that off in the settings).
+  on your own current slide (switch that off in the settings). Where a screen
+  has black bars around the slide, the captions go in the bar instead of over
+  the slide.
+- Drag the captions on your current slide to move them on every screen;
+  double-click them to put them back.
+- Viewers can drag them to their own spot too, and turn them off or on with
+  the **CC** pill in the corner. Both stay on their device.
 - The arrow beside the button picks the microphone (Chrome and Edge; other
   browsers use the system's). The choice stays on this device.
 - If the button says **Mic in use elsewhere**, another tab or window has
@@ -26,11 +32,11 @@ Presio looks up the latest release on GitHub (or the newest tag, or else the
 commit `main` is on right now) and pins the plugin to it. Viewers load the
 plugin themselves and check it's byte for byte the presenter's copy, so a
 moving branch URL could leave them without it. To pick a version, use
-`github:benedict-armstrong/presio-closed-captions@v0.2.0`. A
+`github:benedict-armstrong/presio-closed-captions@v0.3.0`. A
 `https://github.com/benedict-armstrong/presio-closed-captions` link works too.
 
 Under the hood this is served by jsDelivr, e.g.
-`https://cdn.jsdelivr.net/gh/benedict-armstrong/presio-closed-captions@v0.2.0/`,
+`https://cdn.jsdelivr.net/gh/benedict-armstrong/presio-closed-captions@v0.3.0/`,
 which you can also paste directly.
 
 ## Browser support
