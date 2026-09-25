@@ -1,0 +1,66 @@
+{
+  "id": "closed-captions",
+  "name": "Closed Captions",
+  "version": "0.1.0",
+  "author": "Benedict Armstrong",
+  "description": "Live captions of what the presenter says, on the slide for every viewer. Uses the browser's speech recognition on the presenter's device.",
+  "main": "index.html",
+  "surfaces": ["background", "slide"],
+  "activation": ["always"],
+  "permissions": [],
+  "contributes": {
+    "buttons": [
+      {
+        "id": "toggle",
+        "label": "Captions",
+        "icon": "message",
+        "tooltip": "Caption what you say on every viewer screen",
+        "location": "controller.toolbar"
+      }
+    ],
+    "keybindings": [
+      { "command": "toggle", "label": "Captions on/off", "keys": [{ "key": "t" }] }
+    ],
+    "settings": {
+      "language": {
+        "type": "string",
+        "default": "en-US",
+        "maxLength": 35,
+        "description": "Spoken language, as a BCP 47 tag (en-US, de-CH, fr-FR, …)."
+      },
+      "size": {
+        "type": "enum",
+        "default": "medium",
+        "values": ["small", "medium", "large"],
+        "labels": ["Small", "Medium", "Large"],
+        "description": "Caption text size."
+      },
+      "position": {
+        "type": "enum",
+        "default": "bottom",
+        "values": ["bottom", "top"],
+        "labels": ["Bottom of the slide", "Top of the slide"],
+        "description": "Where captions sit on the slide."
+      },
+      "lines": {
+        "type": "number",
+        "default": 2,
+        "minimum": 1,
+        "maximum": 4,
+        "description": "How many lines of captions stay on screen."
+      },
+      "clearAfter": {
+        "type": "number",
+        "default": 6,
+        "minimum": 2,
+        "maximum": 60,
+        "description": "Seconds of silence before the captions fade out."
+      },
+      "showOnPresenter": {
+        "type": "boolean",
+        "default": true,
+        "description": "Also show the captions on your own current slide."
+      }
+    }
+  }
+}

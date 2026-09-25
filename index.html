@@ -1,0 +1,213 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  /* The slide surface is sized to the page, so vw is a fraction of the slide's width. */
+  .captions {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    width: max-content; max-width: 88%; box-sizing: border-box;
+    display: flex; flex-direction: column; justify-content: flex-end;
+    overflow: hidden;
+    padding: .25em .6em; border-radius: .3em;
+    background: rgba(0, 0, 0, .78); color: #fff;
+    line-height: 1.3; text-align: center;
+    transition: opacity .4s;
+  }
+  .captions.bottom { bottom: 5%; }
+  .captions.top { top: 5%; }
+  .captions.small { font-size: 2.2vw; }
+  .captions.medium { font-size: 3vw; }
+  .captions.large { font-size: 4vw; }
+  .captions.hidden { opacity: 0; }
+  .live { opacity: .75; }
+</style>
+</head>
+<body>
+<div class="captions hidden" id="captions"><div><span id="final"></span> <span class="live" id="live"></span></div></div>
+
+<script>
+  // Closed captions for Presio. One file, two surfaces:
+  //  - background (presenter's device): runs the browser's speech recognition
+  //    while captions are on, and sends what it hears to every device;
+  //  - slide (presenter's current slide and every viewer): draws the captions
+  //    over the slide.
+  //
+  // Messages (all from the presenter):
+  //  - "state" { on } (retained): captions on or off — late joiners, and a
+  //    reloaded presenter page, pick it up;
+  //  - "live" { text } (volatile): the words so far of the sentence being said;
+  //  - "line" { text }: a finished sentence.
+
+  if (presio.surface === "background") background();
+  else if (presio.surface === "slide") slide();
+
+  function background() {
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let on = false;
+    let rec = null;
+    let error = "";
+    let lastLive = "";
+    // Recognition ends by itself (silence, a minute of speech, a network
+    // hiccup); while captions are on it's restarted, backing off if it keeps
+    // ending straight away.
+    let startedAt = 0;
+    let quickEnds = 0;
+    let restartTimer = null;
+
+    function renderButton() {
+      if (!Recognition) {
+        presio.ui.setButton("toggle", { disabled: true, label: "No captions here" });
+        return;
+      }
+      presio.ui.setButton("toggle", { active: on, label: error || (on ? "Captions on" : "Captions") });
+    }
+
+    function setOn(next) {
+      if (next && !Recognition) return;
+      on = next;
+      error = "";
+      presio.send("state", { on }, { retain: true });
+      if (on) start();
+      else stop();
+      renderButton();
+    }
+
+    function start() {
+      clearTimeout(restartTimer);
+      if (rec) return;
+      rec = new Recognition();
+      rec.lang = presio.settings.get("language") || navigator.language;
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.onresult = (e) => {
+        let live = "";
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const text = e.results[i][0].transcript.trim();
+          if (!text) continue;
+          if (e.results[i].isFinal) presio.send("line", { text });
+          else live += (live ? " " : "") + text;
+        }
+        if (live !== lastLive) {
+          lastLive = live;
+          presio.send("live", { text: live }, { volatile: true });
+        }
+      };
+      rec.onerror = (e) => {
+        const fatal = {
+          "not-allowed": "Mic blocked",
+          "service-not-allowed": "Mic blocked",
+          "audio-capture": "No microphone",
+          "language-not-supported": "Language unsupported",
+        }[e.error];
+        if (fatal) {
+          setOn(false);
+          error = fatal;
+          renderButton();
+        }
+      };
+      rec.onend = () => {
+        rec = null;
+        if (lastLive) {
+          lastLive = "";
+          presio.send("live", { text: "" }, { volatile: true });
+        }
+        if (!on) return;
+        quickEnds = Date.now() - startedAt < 2000 ? quickEnds + 1 : 0;
+        restartTimer = setTimeout(start, Math.min(250 * 2 ** quickEnds, 10000));
+      };
+      startedAt = Date.now();
+      try {
+        rec.start();
+      } catch (err) {
+        console.error(err);
+        rec = null;
+      }
+    }
+
+    function stop() {
+      clearTimeout(restartTimer);
+      const r = rec;
+      rec = null;
+      if (r) {
+        r.onend = null;
+        r.abort();
+      }
+      lastLive = "";
+    }
+
+    presio.onButton("toggle", () => setOn(!on));
+    presio.onCommand("toggle", () => setOn(!on));
+    // A new language needs a new recognizer.
+    presio.settings.onChange(() => {
+      if (on) {
+        stop();
+        start();
+      }
+    });
+    // Captions were on before this page reloaded: carry on.
+    presio.onMessage(({ type, payload, from }) => {
+      if (type === "state" && from === "presenter" && payload && payload.on && !on) setOn(true);
+    });
+    renderButton();
+  }
+
+  function slide() {
+    const box = document.getElementById("captions");
+    const finalEl = document.getElementById("final");
+    const liveEl = document.getElementById("live");
+    let on = false;
+    let finals = "";
+    let live = "";
+    let fadeTimer = null;
+
+    function render() {
+      const s = presio.settings.all;
+      const shown = on && (presio.role !== "presenter" || s.showOnPresenter !== false);
+      const lines = Math.max(1, Math.min(4, Number(s.lines) || 2));
+      box.className = `captions ${s.position === "top" ? "top" : "bottom"} ${s.size || "medium"}`;
+      box.style.maxHeight = `${lines * 1.3}em`;
+      finalEl.textContent = finals;
+      liveEl.textContent = live;
+      if (!shown || (!finals && !live)) box.classList.add("hidden");
+    }
+
+    function touched() {
+      clearTimeout(fadeTimer);
+      const seconds = Number(presio.settings.get("clearAfter")) || 6;
+      fadeTimer = setTimeout(() => {
+        finals = "";
+        live = "";
+        render();
+      }, seconds * 1000);
+      render();
+    }
+
+    presio.onMessage(({ type, payload, from }) => {
+      if (from !== "presenter") return;
+      if (type === "state") {
+        on = !!(payload && payload.on);
+        if (!on) {
+          finals = "";
+          live = "";
+        }
+        render();
+      } else if (type === "live") {
+        live = (payload && payload.text) || "";
+        touched();
+      } else if (type === "line") {
+        // Keep only a tail: the box shows the last few lines anyway.
+        finals = `${finals} ${(payload && payload.text) || ""}`.trim().slice(-600);
+        live = "";
+        touched();
+      }
+    });
+    presio.settings.onChange(render);
+    presio.onContextChange(render);
+    render();
+  }
+</script>
+</body>
+</html>
